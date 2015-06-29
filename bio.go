@@ -65,6 +65,7 @@ static BIO_METHOD* BIO_s_readBio() { return &readBioMethod; }
 import "C"
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"reflect"
@@ -208,13 +209,48 @@ func (b *writeBio) MakeCBIO() *C.BIO {
 type readBio struct {
 	data_mtx        sync.Mutex
 	op_mtx          sync.Mutex
-	buf             []byte
+	buf             *bytes.Buffer
 	eof             bool
 	release_buffers bool
 }
 
 func loadReadPtr(b *C.BIO) *readBio {
 	return (*readBio)(unsafe.Pointer(b.ptr))
+}
+
+// BytesBufferPool is used to recycle bytes.Buffers since they have an internal
+// buffer that grows as needed and can be reused.  By reusing buffers, lower
+// memory allocations are needed and the garbage collection minimized.
+type bytesBufferPool struct {
+	pool sync.Pool
+}
+
+// NewBytesBufferPool creates a new BytesBufferPool.
+func newBytesBufferPool() *bytesBufferPool {
+	p := bytesBufferPool{}
+	p.pool = sync.Pool{
+		New: func() interface{} {
+			return new(bytes.Buffer)
+		},
+	}
+	return &p
+}
+
+var bufPool = newBytesBufferPool()
+
+// Get returns a new bytes.Buffer that can be immediately reused. The pool will
+// be checked for instances that can be reused, otherwise a new one will be
+// created.
+func (b *bytesBufferPool) Get() *bytes.Buffer {
+	return b.pool.Get().(*bytes.Buffer)
+}
+
+// Put puts a bytes.Buffer returned from Get() back into the pool of instances
+// that can be reused.  After an item is returned it should never be used.  The
+// bytes.Buffer is cleared before putting back into the pool.
+func (b *bytesBufferPool) Put(buf *bytes.Buffer) {
+	buf.Reset()
+	b.pool.Put(buf)
 }
 
 //export readBioRead
@@ -232,7 +268,7 @@ func readBioRead(b *C.BIO, data *C.char, size C.int) (rc C.int) {
 	ptr.data_mtx.Lock()
 	defer ptr.data_mtx.Unlock()
 	bioClearRetryFlags(b)
-	if len(ptr.buf) == 0 {
+	if ptr.buf.Len() == 0 {
 		if ptr.eof {
 			return 0
 		}
@@ -240,13 +276,9 @@ func readBioRead(b *C.BIO, data *C.char, size C.int) (rc C.int) {
 		return -1
 	}
 	if size == 0 || data == nil {
-		return C.int(len(ptr.buf))
+		return C.int(ptr.buf.Len())
 	}
-	n := copy(nonCopyCString(data, size), ptr.buf)
-	ptr.buf = ptr.buf[:copy(ptr.buf, ptr.buf[n:])]
-	if ptr.release_buffers && len(ptr.buf) == 0 {
-		ptr.buf = nil
-	}
+	n, _ := ptr.buf.Read(nonCopyCString(data, size))
 	return C.int(n)
 }
 
@@ -277,39 +309,34 @@ func readBioPending(b *C.BIO) C.long {
 	}
 	ptr.data_mtx.Lock()
 	defer ptr.data_mtx.Unlock()
-	return C.long(len(ptr.buf))
+	return C.long(ptr.buf.Len())
 }
 
-func (b *readBio) ReadFromOnce(r io.Reader) (n int, err error) {
+var readBufPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, SSLRecordSize*2)
+		return &b
+	},
+}
+
+func (b *readBio) ReadFromOnce(r io.Reader) (int, error) {
 	b.op_mtx.Lock()
 	defer b.op_mtx.Unlock()
 
 	// make sure we have a destination that fits at least one SSL record
-	b.data_mtx.Lock()
-	if cap(b.buf) < len(b.buf)+SSLRecordSize {
-		new_buf := make([]byte, len(b.buf), len(b.buf)+SSLRecordSize)
-		copy(new_buf, b.buf)
-		b.buf = new_buf
+	tmpBuf := readBufPool.Get().(*[]byte)
+	x, e := r.Read(*tmpBuf)
+	if x > 0 {
+		b.data_mtx.Lock()
+		b.buf.Write((*tmpBuf)[:x])
+		b.data_mtx.Unlock()
 	}
-	dst := b.buf[len(b.buf):cap(b.buf)]
-	dst_slice := b.buf
-	b.data_mtx.Unlock()
-
-	n, err = r.Read(dst)
-	b.data_mtx.Lock()
-	defer b.data_mtx.Unlock()
-	if n > 0 {
-		if len(dst_slice) != len(b.buf) {
-			// someone shrunk the buffer, so we read in too far ahead and we
-			// need to slide backwards
-			copy(b.buf[len(b.buf):len(b.buf)+n], dst)
-		}
-		b.buf = b.buf[:len(b.buf)+n]
-	}
-	return n, err
+	readBufPool.Put(tmpBuf)
+	return int(x), e
 }
 
 func (b *readBio) MakeCBIO() *C.BIO {
+	b.buf = bufPool.Get()
 	rv := C.BIO_new(C.BIO_s_readBio())
 	rv.ptr = unsafe.Pointer(b)
 	return rv
@@ -317,6 +344,7 @@ func (b *readBio) MakeCBIO() *C.BIO {
 
 func (self *readBio) Disconnect(b *C.BIO) {
 	if loadReadPtr(b) == self {
+		bufPool.Put(self.buf)
 		b.ptr = nil
 	}
 }
@@ -353,3 +381,4 @@ func (b *anyBio) Write(buf []byte) (written int, err error) {
 	}
 	return n, nil
 }
+

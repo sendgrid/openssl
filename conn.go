@@ -20,6 +20,7 @@ package openssl
 // #include <openssl/ssl.h>
 // #include <openssl/conf.h>
 // #include <openssl/err.h>
+// #include "conn.h"
 //
 // int sk_X509_num_not_a_macro(STACK_OF(X509) *sk) { return sk_X509_num(sk); }
 // X509 *sk_X509_value_not_a_macro(STACK_OF(X509)* sk, int i) {
@@ -31,6 +32,10 @@ package openssl
 // const char * SSL_get_cipher_name_not_a_macro(const SSL *ssl) {
 //    return SSL_get_cipher_name(ssl);
 // }
+// extern int SSL_read_with_error(SSL *ssl, void *buf, int num, SSLFuncError *err);
+// extern int SSL_write_with_error(SSL *ssl, void *buf, int num, SSLFuncError *err);
+// extern int SSL_handshake_with_error(SSL *ssl, SSLFuncError *err);
+// extern int SSL_shutdown_with_error(SSL *ssl, SSLFuncError *err);
 import "C"
 
 import (
@@ -53,14 +58,18 @@ var (
 )
 
 type Conn struct {
-	conn             net.Conn
-	ssl              *C.SSL
-	ctx              *Ctx // for gc
-	into_ssl         *readBio
-	from_ssl         *writeBio
-	is_shutdown      bool
-	mtx              sync.Mutex
-	want_read_future *utils.Future
+	conn               net.Conn
+	ssl                *C.SSL
+	ctx                *Ctx // for gc
+	into_ssl           *readBio
+	from_ssl           *writeBio
+	is_shutdown        bool
+	mtx                sync.Mutex
+	want_read_future   *utils.Future
+	lastReadError      C.SSLFuncError
+	lastWriteError     C.SSLFuncError
+	lastHandshakeError C.SSLFuncError
+	lastShutdownError  C.SSLFuncError
 }
 
 type VerifyResult int
@@ -299,13 +308,15 @@ func (c *Conn) handshake() func() error {
 	if c.is_shutdown {
 		return func() error { return io.ErrUnexpectedEOF }
 	}
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-	rv, errno := C.SSL_do_handshake(c.ssl)
+	c.lastHandshakeError.error_code = 0
+	c.lastHandshakeError.has_errno = 0
+	c.lastHandshakeError.error_message = nil
+
+	rv, errno := C.SSL_handshake_with_error(c.ssl, &c.lastHandshakeError)
 	if rv > 0 {
 		return nil
 	}
-	return c.getErrorHandler(rv, errno)
+	return c.ioErrorHandler(rv, errno, &c.lastHandshakeError)
 }
 
 // Handshake performs an SSL handshake. If a handshake is not manually
@@ -379,9 +390,11 @@ func (c *Conn) ConnectionState() (rv ConnectionState) {
 func (c *Conn) shutdown() func() error {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-	rv, errno := C.SSL_shutdown(c.ssl)
+	c.lastShutdownError.error_code = 0
+	c.lastShutdownError.has_errno = 0
+	c.lastShutdownError.error_message = nil
+
+	rv, errno := C.SSL_shutdown_with_error(c.ssl, &c.lastShutdownError)
 	if rv > 0 {
 		return nil
 	}
@@ -397,7 +410,7 @@ func (c *Conn) shutdown() func() error {
 		// shutting down the write-side of the connection.
 		return nil
 	} else {
-		return c.getErrorHandler(rv, errno)
+		return c.ioErrorHandler(rv, errno, &c.lastShutdownError)
 	}
 }
 
@@ -436,6 +449,76 @@ func (c *Conn) Close() error {
 	return errs.Finalize()
 }
 
+func (c *Conn) ioErrorHandler(rv C.int, errno error, funcErr *C.SSLFuncError) func() error {
+	errorString := ""
+
+	if funcErr.error_message != nil {
+		errorString = C.GoStringN(funcErr.error_message, 255)
+		C.free(unsafe.Pointer(funcErr.error_message))
+		funcErr.error_message = nil
+	}
+
+	errcode := C.int(funcErr.error_code)
+	switch errcode {
+	case C.SSL_ERROR_ZERO_RETURN:
+		return func() error {
+			c.Close()
+			return io.ErrUnexpectedEOF
+		}
+	case C.SSL_ERROR_WANT_READ:
+		go c.flushOutputBuffer()
+		if c.want_read_future != nil {
+			want_read_future := c.want_read_future
+			return func() error {
+				_, err := want_read_future.Get()
+				return err
+			}
+		}
+		c.want_read_future = utils.NewFuture()
+		want_read_future := c.want_read_future
+		return func() (err error) {
+			defer func() {
+				c.mtx.Lock()
+				c.want_read_future = nil
+				c.mtx.Unlock()
+				want_read_future.Set(nil, err)
+			}()
+			err = c.fillInputBuffer()
+			if err != nil {
+				return err
+			}
+			return tryAgain
+		}
+	case C.SSL_ERROR_WANT_WRITE:
+		return func() error {
+			err := c.flushOutputBuffer()
+			if err != nil {
+				return err
+			}
+			return tryAgain
+		}
+	case C.SSL_ERROR_NONE:
+		return func() error {
+			return nil
+		}
+	case C.SSL_ERROR_SYSCALL:
+		var retErr error
+		if funcErr.has_errno != 0 {
+			switch rv {
+			case 0:
+				retErr = errors.New("protocol-violating EOF")
+			case -1:
+				retErr = errno
+			}
+		} else {
+			retErr = errors.New(errorString)
+		}
+		return func() error { return retErr }
+	default:
+		return func() error { return errors.New(errorString) }
+	}
+}
+
 func (c *Conn) read(b []byte) (int, func() error) {
 	if len(b) == 0 {
 		return 0, nil
@@ -445,13 +528,14 @@ func (c *Conn) read(b []byte) (int, func() error) {
 	if c.is_shutdown {
 		return 0, func() error { return io.EOF }
 	}
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-	rv, errno := C.SSL_read(c.ssl, unsafe.Pointer(&b[0]), C.int(len(b)))
+	c.lastReadError.error_code = 0
+	c.lastReadError.has_errno = 0
+	c.lastReadError.error_message = nil
+	rv, errno := C.SSL_read_with_error(c.ssl, unsafe.Pointer(&b[0]), C.int(len(b)), &c.lastReadError)
 	if rv > 0 {
 		return int(rv), nil
 	}
-	return 0, c.getErrorHandler(rv, errno)
+	return 0, c.ioErrorHandler(rv, errno, &c.lastReadError)
 }
 
 // Read reads up to len(b) bytes into b. It returns the number of bytes read
@@ -486,13 +570,14 @@ func (c *Conn) write(b []byte) (int, func() error) {
 		err := errors.New("connection closed")
 		return 0, func() error { return err }
 	}
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-	rv, errno := C.SSL_write(c.ssl, unsafe.Pointer(&b[0]), C.int(len(b)))
+	c.lastWriteError.error_code = 0
+	c.lastWriteError.has_errno = 0
+	c.lastWriteError.error_message = nil
+	rv, errno := C.SSL_write_with_error(c.ssl, unsafe.Pointer(&b[0]), C.int(len(b)), &c.lastWriteError)
 	if rv > 0 {
 		return int(rv), nil
 	}
-	return 0, c.getErrorHandler(rv, errno)
+	return 0, c.ioErrorHandler(rv, errno, &c.lastWriteError)
 }
 
 // Write will encrypt the contents of b and write it to the underlying stream.
