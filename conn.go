@@ -234,67 +234,6 @@ func (c *Conn) flushOutputBuffer() error {
 	return err
 }
 
-func (c *Conn) getErrorHandler(rv C.int, errno error) func() error {
-	errcode := C.SSL_get_error(c.ssl, rv)
-	switch errcode {
-	case C.SSL_ERROR_ZERO_RETURN:
-		return func() error {
-			c.Close()
-			return io.ErrUnexpectedEOF
-		}
-	case C.SSL_ERROR_WANT_READ:
-		go c.flushOutputBuffer()
-		if c.want_read_future != nil {
-			want_read_future := c.want_read_future
-			return func() error {
-				_, err := want_read_future.Get()
-				return err
-			}
-		}
-		c.want_read_future = utils.NewFuture()
-		want_read_future := c.want_read_future
-		return func() (err error) {
-			defer func() {
-				c.mtx.Lock()
-				c.want_read_future = nil
-				c.mtx.Unlock()
-				want_read_future.Set(nil, err)
-			}()
-			err = c.fillInputBuffer()
-			if err != nil {
-				return err
-			}
-			return tryAgain
-		}
-	case C.SSL_ERROR_WANT_WRITE:
-		return func() error {
-			err := c.flushOutputBuffer()
-			if err != nil {
-				return err
-			}
-			return tryAgain
-		}
-	case C.SSL_ERROR_SYSCALL:
-		var err error
-		if C.ERR_peek_error() == 0 {
-			switch rv {
-			case 0:
-				err = errors.New("protocol-violating EOF")
-			case -1:
-				err = errno
-			default:
-				err = errorFromErrorQueue()
-			}
-		} else {
-			err = errorFromErrorQueue()
-		}
-		return func() error { return err }
-	default:
-		err := errorFromErrorQueue()
-		return func() error { return err }
-	}
-}
-
 func (c *Conn) handleError(errcb func() error) error {
 	if errcb != nil {
 		return errcb()
