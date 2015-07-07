@@ -44,7 +44,11 @@ void process_error_code(SSLFuncError *err, const SSL *ssl, int ret) {
     		ERR_error_string_n(result, err->error_message, 255);
     		break;
     }
+#if (OPENSSL_VERSION_NUMBER < 0x10000000L)
+    ERR_remove_state(0);
+#else
     ERR_remove_thread_state(NULL);
+#endif
 }
 
 

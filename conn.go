@@ -47,7 +47,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/spacemonkeygo/openssl/utils"
+	"github.com/sendgrid/openssl/utils"
 )
 
 var (
