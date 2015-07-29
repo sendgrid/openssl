@@ -32,6 +32,7 @@ package openssl
 // const char * SSL_get_cipher_name_not_a_macro(const SSL *ssl) {
 //    return SSL_get_cipher_name(ssl);
 // }
+// int SSL_session_reused_macro(SSL *ssl) { return SSL_session_reused(ssl); }
 // extern int SSL_read_with_error(SSL *ssl, void *buf, int num, SSLFuncError *err);
 // extern int SSL_write_with_error(SSL *ssl, void *buf, int num, SSLFuncError *err);
 // extern int SSL_handshake_with_error(SSL *ssl, SSLFuncError *err);
@@ -589,4 +590,13 @@ func (c *Conn) SetTlsExtHostName(name string) error {
 
 func (c *Conn) VerifyResult() VerifyResult {
 	return VerifyResult(C.SSL_get_verify_result(c.ssl))
+}
+
+// Returns true if the a session was reused.
+func (c *Conn) IsReused() bool {
+	res := int(C.SSL_session_reused_macro(c.ssl))
+	if res == 1 {
+		return true
+	}
+	return false
 }
