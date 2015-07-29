@@ -74,6 +74,10 @@ static long SSL_CTX_set_read_ahead_macro(SSL_CTX* ctx) {
     return SSL_CTX_set_read_ahead(ctx, 1);
 }
 
+static long SSL_CTX_set_tlsext_ticket_keys_macro(SSL_CTX* ctx, void* keys, unsigned int keys_len) {
+   return SSL_CTX_set_tlsext_ticket_keys(ctx, keys, keys_len);
+}
+
 #ifndef SSL_MODE_RELEASE_BUFFERS
 #define SSL_MODE_RELEASE_BUFFERS 0
 #endif
@@ -609,4 +613,14 @@ func (c *Ctx) SessSetCacheSize(t int) int {
 // https://www.openssl.org/docs/ssl/SSL_CTX_sess_set_cache_size.html
 func (c *Ctx) SessGetCacheSize() int {
 	return int(C.SSL_CTX_sess_get_cache_size_not_a_macro(c.ctx))
+}
+
+// Set ticket secret key
+func (c *Ctx) SetTicketKeys(k1, k2, k3 [16]byte) int {
+	keys := make([]byte, 0, 48)
+	keys = append(keys, k1[:]...)
+	keys = append(keys, k2[:]...)
+	keys = append(keys, k3[:]...)
+	ptr := unsafe.Pointer(&keys[0])
+	return int(C.SSL_CTX_set_tlsext_ticket_keys_macro(c.ctx, ptr, 48))
 }
