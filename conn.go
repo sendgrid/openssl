@@ -44,6 +44,7 @@ import (
 	"io"
 	"net"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -389,11 +390,21 @@ func (c *Conn) Close() error {
 	return errs.Finalize()
 }
 
+// This terminates the C string at the first \0 it finds.
+func strndup(cs *C.char, len int) string {
+	s := C.GoStringN(cs, C.int(len))
+	i := strings.IndexByte(s, 0)
+	if i == -1 {
+		return s
+	}
+	return C.GoString(cs)
+}
+
 func (c *Conn) ioErrorHandler(rv C.int, errno error, funcErr *C.SSLFuncError) func() error {
 	errorString := ""
 
 	if funcErr.error_message != nil {
-		errorString = C.GoStringN(funcErr.error_message, 255)
+		errorString = strndup(funcErr.error_message, 255)
 		C.free(unsafe.Pointer(funcErr.error_message))
 		funcErr.error_message = nil
 	}
