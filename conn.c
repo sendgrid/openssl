@@ -4,25 +4,29 @@
 #include "conn.h"
 #include <stdio.h>
 
+// Set error message in err
+void set_error_message(SSLFuncError *err) {
+    int result;
+    err->error_message = (char *)calloc(256, sizeof(char));
+    result = ERR_get_error();
+    ERR_error_string_n(result, err->error_message, 255);
+}
+
 // Handle error codes
 void process_error_code(SSLFuncError *err, const SSL *ssl, int ret) {
-    int result;
-    switch(SSL_get_error(ssl, ret)) {
+    int has_error;
+    err->error_code = SSL_get_error(ssl, ret);
+    switch(err->error_code) {
     	case SSL_ERROR_NONE:
-    		err->error_code = SSL_ERROR_NONE;
     		break;
     	case SSL_ERROR_ZERO_RETURN:
-    		err->error_code = SSL_ERROR_ZERO_RETURN;
     		break;
     	case SSL_ERROR_WANT_READ:
-    	    err->error_code = SSL_ERROR_WANT_READ;
     	    break;
     	case SSL_ERROR_WANT_WRITE:
-    	    err->error_code = SSL_ERROR_WANT_WRITE;
     	    break;
     	case SSL_ERROR_SYSCALL:
-    	    err->error_code = SSL_ERROR_SYSCALL;
-    	    int has_error = 0;
+    	    has_error = 0;
     	    if (ERR_peek_error() == 0) {
     	    	switch(ret) {
     	    		case 0:
@@ -33,15 +37,11 @@ void process_error_code(SSLFuncError *err, const SSL *ssl, int ret) {
     	    	}
     	    }
     	    if (has_error == 0) {
-                err->error_message = (char *)malloc(256*sizeof(char));
-    	    	result = ERR_get_error();
-    	    	ERR_error_string_n(result, err->error_message, 255);
+        	    set_error_message(err);
     	    }
     	    break;
     	default:
-            err->error_message = (char *)malloc(256*sizeof(char));
-    		result = ERR_get_error();
-    		ERR_error_string_n(result, err->error_message, 255);
+    	    set_error_message(err);
     		break;
     }
 #if (OPENSSL_VERSION_NUMBER < 0x10000000L)
