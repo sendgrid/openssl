@@ -1,4 +1,4 @@
-// Copyright (C) 2014 Space Monkey, Inc.
+// Copyright (C) 2017. See AUTHORS.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -11,8 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
-// +build cgo
 
 /*
 Package openssl is a light wrapper around OpenSSL for Go.
@@ -86,54 +84,18 @@ supported the generality needed to use OpenSSL instead of crypto/tls.
 */
 package openssl
 
-/*
-#include <openssl/ssl.h>
-#include <openssl/conf.h>
-#include <openssl/err.h>
-#include <openssl/evp.h>
-#include <openssl/engine.h>
-
-extern int Goopenssl_init_locks();
-extern void Goopenssl_thread_locking_callback(int, int, const char*, int);
-
-static int Goopenssl_init_threadsafety() {
-	// Set up OPENSSL thread safety callbacks.  We only set the locking
-	// callback because the default id callback implementation is good
-	// enough for us.
-	int rc = Goopenssl_init_locks();
-	if (rc == 0) {
-		CRYPTO_set_locking_callback(Goopenssl_thread_locking_callback);
-	}
-	return rc;
-}
-
-static void OpenSSL_add_all_algorithms_not_a_macro() {
-	OpenSSL_add_all_algorithms();
-}
-
-*/
+// #include "shim.h"
 import "C"
 
 import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
-)
-
-var (
-	sslMutexes []sync.Mutex
 )
 
 func init() {
-	C.OPENSSL_config(nil)
-	C.ENGINE_load_builtin_engines()
-	C.SSL_load_error_strings()
-	C.SSL_library_init()
-	C.OpenSSL_add_all_algorithms_not_a_macro()
-	rc := C.Goopenssl_init_threadsafety()
-	if rc != 0 {
-		panic(fmt.Errorf("Goopenssl_init_locks failed with %d", rc))
+	if rc := C.X_shim_init(); rc != 0 {
+		panic(fmt.Errorf("X_shim_init failed with %d", rc))
 	}
 }
 

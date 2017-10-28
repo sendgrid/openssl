@@ -1,4 +1,4 @@
-// Copyright (C) 2014 Space Monkey, Inc.
+// Copyright (C) 2017. See AUTHORS.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,56 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// +build cgo
-
 package openssl
 
-/*
-#include <string.h>
-#include <openssl/bio.h>
-
-extern int cbioNew(BIO *b);
-static int cbioFree(BIO *b) {
-	return 1;
-}
-
-extern int writeBioWrite(BIO *b, char *buf, int size);
-extern long writeBioCtrl(BIO *b, int cmd, long arg1, void *arg2);
-static int writeBioPuts(BIO *b, const char *str) {
-    return writeBioWrite(b, (char*)str, (int)strlen(str));
-}
-
-extern int readBioRead(BIO *b, char *buf, int size);
-extern long readBioCtrl(BIO *b, int cmd, long arg1, void *arg2);
-
-static BIO_METHOD writeBioMethod = {
-    BIO_TYPE_SOURCE_SINK,
-    "Go Write BIO",
-    (int (*)(BIO *, const char *, int))writeBioWrite,
-    NULL,
-    writeBioPuts,
-    NULL,
-    writeBioCtrl,
-    cbioNew,
-    cbioFree,
-    NULL};
-
-static BIO_METHOD* BIO_s_writeBio() { return &writeBioMethod; }
-
-static BIO_METHOD readBioMethod = {
-    BIO_TYPE_SOURCE_SINK,
-    "Go Read BIO",
-    NULL,
-    readBioRead,
-    NULL,
-    NULL,
-    readBioCtrl,
-    cbioNew,
-    cbioFree,
-    NULL};
-
-static BIO_METHOD* BIO_s_readBio() { return &readBioMethod; }
-*/
+// #include "shim.h"
 import "C"
 
 import (
@@ -90,15 +43,7 @@ func nonCopyCString(data *C.char, size C.int) []byte {
 	return nonCopyGoBytes(uintptr(unsafe.Pointer(data)), int(size))
 }
 
-//export cbioNew
-func cbioNew(b *C.BIO) C.int {
-	b.shutdown = 1
-	b.init = 1
-	b.num = -1
-	b.ptr = nil
-	b.flags = 0
-	return 1
-}
+var writeBioMapping = newMapping()
 
 type writeBio struct {
 	data_mtx        sync.Mutex
@@ -108,21 +53,20 @@ type writeBio struct {
 }
 
 func loadWritePtr(b *C.BIO) *writeBio {
-	return (*writeBio)(unsafe.Pointer(b.ptr))
+	t := token(C.X_BIO_get_data(b))
+	return (*writeBio)(writeBioMapping.Get(t))
 }
 
 func bioClearRetryFlags(b *C.BIO) {
-	// from BIO_clear_retry_flags and BIO_clear_flags
-	b.flags &= ^(C.BIO_FLAGS_RWS | C.BIO_FLAGS_SHOULD_RETRY)
+	C.X_BIO_clear_flags(b, C.BIO_FLAGS_RWS|C.BIO_FLAGS_SHOULD_RETRY)
 }
 
 func bioSetRetryRead(b *C.BIO) {
-	// from BIO_set_retry_read and BIO_set_flags
-	b.flags |= (C.BIO_FLAGS_READ | C.BIO_FLAGS_SHOULD_RETRY)
+	C.X_BIO_set_flags(b, C.BIO_FLAGS_READ|C.BIO_FLAGS_SHOULD_RETRY)
 }
 
-//export writeBioWrite
-func writeBioWrite(b *C.BIO, data *C.char, size C.int) (rc C.int) {
+//export go_write_bio_write
+func go_write_bio_write(b *C.BIO, data *C.char, size C.int) (rc C.int) {
 	defer func() {
 		if err := recover(); err != nil {
 			logger.Critf("openssl: writeBioWrite panic'd: %v", err)
@@ -140,8 +84,8 @@ func writeBioWrite(b *C.BIO, data *C.char, size C.int) (rc C.int) {
 	return size
 }
 
-//export writeBioCtrl
-func writeBioCtrl(b *C.BIO, cmd C.int, arg1 C.long, arg2 unsafe.Pointer) (
+//export go_write_bio_ctrl
+func go_write_bio_ctrl(b *C.BIO, cmd C.int, arg1 C.long, arg2 unsafe.Pointer) (
 	rc C.long) {
 	defer func() {
 		if err := recover(); err != nil {
@@ -196,15 +140,19 @@ func (b *writeBio) WriteTo(w io.Writer) (rv int64, err error) {
 
 func (self *writeBio) Disconnect(b *C.BIO) {
 	if loadWritePtr(b) == self {
-		b.ptr = nil
+		writeBioMapping.Del(token(C.X_BIO_get_data(b)))
+		C.X_BIO_set_data(b, nil)
 	}
 }
 
 func (b *writeBio) MakeCBIO() *C.BIO {
-	rv := C.BIO_new(C.BIO_s_writeBio())
-	rv.ptr = unsafe.Pointer(b)
+	rv := C.X_BIO_new_write_bio()
+	token := writeBioMapping.Add(unsafe.Pointer(b))
+	C.X_BIO_set_data(rv, unsafe.Pointer(token))
 	return rv
 }
+
+var readBioMapping = newMapping()
 
 type readBio struct {
 	data_mtx        sync.Mutex
@@ -215,49 +163,14 @@ type readBio struct {
 }
 
 func loadReadPtr(b *C.BIO) *readBio {
-	return (*readBio)(unsafe.Pointer(b.ptr))
+	return (*readBio)(readBioMapping.Get(token(C.X_BIO_get_data(b))))
 }
 
-// BytesBufferPool is used to recycle bytes.Buffers since they have an internal
-// buffer that grows as needed and can be reused.  By reusing buffers, lower
-// memory allocations are needed and the garbage collection minimized.
-type bytesBufferPool struct {
-	pool sync.Pool
-}
-
-// NewBytesBufferPool creates a new BytesBufferPool.
-func newBytesBufferPool() *bytesBufferPool {
-	p := bytesBufferPool{}
-	p.pool = sync.Pool{
-		New: func() interface{} {
-			return new(bytes.Buffer)
-		},
-	}
-	return &p
-}
-
-var bufPool = newBytesBufferPool()
-
-// Get returns a new bytes.Buffer that can be immediately reused. The pool will
-// be checked for instances that can be reused, otherwise a new one will be
-// created.
-func (b *bytesBufferPool) Get() *bytes.Buffer {
-	return b.pool.Get().(*bytes.Buffer)
-}
-
-// Put puts a bytes.Buffer returned from Get() back into the pool of instances
-// that can be reused.  After an item is returned it should never be used.  The
-// bytes.Buffer is cleared before putting back into the pool.
-func (b *bytesBufferPool) Put(buf *bytes.Buffer) {
-	buf.Reset()
-	b.pool.Put(buf)
-}
-
-//export readBioRead
-func readBioRead(b *C.BIO, data *C.char, size C.int) (rc C.int) {
+//export go_read_bio_read
+func go_read_bio_read(b *C.BIO, data *C.char, size C.int) (rc C.int) {
 	defer func() {
 		if err := recover(); err != nil {
-			logger.Critf("openssl: readBioRead panic'd: %v", err)
+			logger.Critf("openssl: go_read_bio_read panic'd: %v", err)
 			rc = -1
 		}
 	}()
@@ -282,8 +195,8 @@ func readBioRead(b *C.BIO, data *C.char, size C.int) (rc C.int) {
 	return C.int(n)
 }
 
-//export readBioCtrl
-func readBioCtrl(b *C.BIO, cmd C.int, arg1 C.long, arg2 unsafe.Pointer) (
+//export go_read_bio_ctrl
+func go_read_bio_ctrl(b *C.BIO, cmd C.int, arg1 C.long, arg2 unsafe.Pointer) (
 	rc C.long) {
 
 	defer func() {
@@ -336,16 +249,16 @@ func (b *readBio) ReadFromOnce(r io.Reader) (int, error) {
 }
 
 func (b *readBio) MakeCBIO() *C.BIO {
-	b.buf = bufPool.Get()
-	rv := C.BIO_new(C.BIO_s_readBio())
-	rv.ptr = unsafe.Pointer(b)
+	rv := C.X_BIO_new_read_bio()
+	token := readBioMapping.Add(unsafe.Pointer(b))
+	C.X_BIO_set_data(rv, unsafe.Pointer(token))
 	return rv
 }
 
 func (self *readBio) Disconnect(b *C.BIO) {
 	if loadReadPtr(b) == self {
-		bufPool.Put(self.buf)
-		b.ptr = nil
+		readBioMapping.Del(token(C.X_BIO_get_data(b)))
+		C.X_BIO_set_data(b, nil)
 	}
 }
 
@@ -363,7 +276,7 @@ func (b *anyBio) Read(buf []byte) (n int, err error) {
 	if len(buf) == 0 {
 		return 0, nil
 	}
-	n = int(C.BIO_read((*C.BIO)(b), unsafe.Pointer(&buf[0]), C.int(len(buf))))
+	n = int(C.X_BIO_read((*C.BIO)(b), unsafe.Pointer(&buf[0]), C.int(len(buf))))
 	if n <= 0 {
 		return 0, io.EOF
 	}
@@ -374,7 +287,7 @@ func (b *anyBio) Write(buf []byte) (written int, err error) {
 	if len(buf) == 0 {
 		return 0, nil
 	}
-	n := int(C.BIO_write((*C.BIO)(b), unsafe.Pointer(&buf[0]),
+	n := int(C.X_BIO_write((*C.BIO)(b), unsafe.Pointer(&buf[0]),
 		C.int(len(buf))))
 	if n != len(buf) {
 		return n, errors.New("BIO write failed")

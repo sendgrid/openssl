@@ -12,13 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// +build !openssl_static
+#include <openssl/ssl.h>
+#include "_cgo_export.h"
+#include <stdio.h>
 
-package openssl
-
-// #cgo pkg-config: libssl libcrypto
-// #cgo linux CFLAGS: -Wno-deprecated-declarations
-// #cgo darwin CFLAGS: -I/usr/local/opt/openssl@1.1/include -I/usr/local/opt/openssl/include -Wno-deprecated-declarations
-// #cgo darwin LDFLAGS: -w -L/usr/local/opt/openssl@1.1/lib -L/usr/local/opt/openssl/lib
-// #cgo windows CFLAGS: -DWIN32_LEAN_AND_MEAN
-import "C"
+int sni_cb(SSL *con, int *ad, void *arg) {
+	SSL_CTX* ssl_ctx = ssl_ctx = SSL_get_SSL_CTX(con);
+	void* p = SSL_CTX_get_ex_data(ssl_ctx, get_ssl_ctx_idx());
+	return sni_cb_thunk(p, con, ad, arg);
+}

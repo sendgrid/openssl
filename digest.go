@@ -14,37 +14,38 @@
 
 package openssl
 
-/*
-#include "openssl/engine.h"
-*/
+// #include "shim.h"
 import "C"
 
 import (
 	"fmt"
-	"runtime"
 	"unsafe"
 )
 
-type Engine struct {
-	e *C.ENGINE
+// Digest represents and openssl message digest.
+type Digest struct {
+	ptr *C.EVP_MD
 }
 
-func EngineById(name string) (*Engine, error) {
+// GetDigestByName returns the Digest with the name or nil and an error if the
+// digest was not found.
+func GetDigestByName(name string) (*Digest, error) {
 	cname := C.CString(name)
 	defer C.free(unsafe.Pointer(cname))
-	e := &Engine{
-		e: C.ENGINE_by_id(cname),
+	p := C.X_EVP_get_digestbyname(cname)
+	if p == nil {
+		return nil, fmt.Errorf("Digest %v not found", name)
 	}
-	if e.e == nil {
-		return nil, fmt.Errorf("engine %s missing", name)
+	// we can consider digests to use static mem; don't need to free
+	return &Digest{ptr: p}, nil
+}
+
+// GetDigestByName returns the Digest with the NID or nil and an error if the
+// digest was not found.
+func GetDigestByNid(nid NID) (*Digest, error) {
+	sn, err := Nid2ShortName(nid)
+	if err != nil {
+		return nil, err
 	}
-	if C.ENGINE_init(e.e) == 0 {
-		C.ENGINE_free(e.e)
-		return nil, fmt.Errorf("engine %s not initialized", name)
-	}
-	runtime.SetFinalizer(e, func(e *Engine) {
-		C.ENGINE_finish(e.e)
-		C.ENGINE_free(e.e)
-	})
-	return e, nil
+	return GetDigestByName(sn)
 }

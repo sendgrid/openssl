@@ -1,4 +1,4 @@
-// Copyright (C) 2014 Ryan Hileman
+// Copyright (C) 2017. See AUTHORS.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
 package openssl
 
 import (
+	"math/big"
 	"testing"
 	"time"
 )
@@ -25,7 +26,7 @@ func TestCertGenerate(t *testing.T) {
 		t.Fatal(err)
 	}
 	info := &CertificateInfo{
-		Serial:       1,
+		Serial:       big.NewInt(int64(1)),
 		Issued:       0,
 		Expires:      24 * time.Hour,
 		Country:      "US",
@@ -47,7 +48,7 @@ func TestCAGenerate(t *testing.T) {
 		t.Fatal(err)
 	}
 	info := &CertificateInfo{
-		Serial:       1,
+		Serial:       big.NewInt(int64(1)),
 		Issued:       0,
 		Expires:      24 * time.Hour,
 		Country:      "US",
@@ -74,7 +75,7 @@ func TestCAGenerate(t *testing.T) {
 		t.Fatal(err)
 	}
 	info = &CertificateInfo{
-		Serial:       1,
+		Serial:       big.NewInt(int64(1)),
 		Issued:       0,
 		Expires:      24 * time.Hour,
 		Country:      "US",
@@ -106,7 +107,7 @@ func TestCertGetNameEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 	info := &CertificateInfo{
-		Serial:       1,
+		Serial:       big.NewInt(int64(1)),
 		Issued:       0,
 		Expires:      24 * time.Hour,
 		Country:      "US",
