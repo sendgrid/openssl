@@ -1,4 +1,4 @@
-// Copyright (C) 2014 Space Monkey, Inc.
+// Copyright (C) 2017. See AUTHORS.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -31,6 +31,12 @@ func TestMarshal(t *testing.T) {
 		t.Fatal(err)
 	}
 	cert, err := LoadCertificateFromPEM(certBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	privateBlock, _ := pem_pkg.Decode(keyBytes)
+	key, err = LoadPrivateKeyFromDER(privateBlock.Bytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,6 +149,27 @@ func TestGenerate(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = key.MarshalPKCS1PrivateKeyPEM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = GenerateRSAKeyWithExponent(1024, 65537)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSign(t *testing.T) {
+	key, _ := GenerateRSAKey(1024)
+	data := []byte("the quick brown fox jumps over the lazy dog")
+	_, err := key.SignPKCS1v15(SHA1_Method, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = key.SignPKCS1v15(SHA256_Method, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = key.SignPKCS1v15(SHA512_Method, data)
 	if err != nil {
 		t.Fatal(err)
 	}
